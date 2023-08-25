@@ -1,3 +1,24 @@
 This is an x86-64 bomb for self-study students. 
 
-Use `objdump -d -M intel bomb > tmp` to read the whole asm code.
+
+##################
+
+个人习惯看intel风格汇编，使用命令获取intel风格汇编代码：
+`objdump -d -M intel bomb > tmp`
+
+phase1：
+mov    esi,0x402400   这个地址凭空出现，是什么？ gdb中执行 p (char*)0x402400  可得答案
+
+
+phase2：
+一个循环，注意汇编语言的文本顺序和逻辑顺序相差很大，可以把非jmp cmp的指令缩成一个黑箱，方便找拐点信息
+
+phase3：
+switch 原理
+
+phase4：
+想办法避开递归 jmp出来 可得答案
+
+phase5：
+phase6：
+TODO，非研究重心，时间充裕再干
