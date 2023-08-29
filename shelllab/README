@@ -20,3 +20,28 @@ mysplit.c	# Forks a child that spins for <n> seconds
 mystop.c        # Spins for <n> seconds and sends SIGTSTP to itself
 myint.c         # Spins for <n> seconds and sends SIGINT to itself
 
+
+##############################
+实验需求： 支持shell调用已有可执行程序、信号捕捉与转发、jobs管理。 可使用所有系统函数。
+
+调用的可执行程序是机器自带的，如/bin/ls /bin/ps /bin/top等
+
+jobs管理系统是自行写的，维护一个jobs数组保存各job状态：
+```c
+struct job_t {              /* The job struct */
+    pid_t pid;              /* job PID */
+    int jid;                /* job ID [1, 2, ...] */
+    int state;              /* UNDEF, BG, FG, or ST */
+    char cmdline[MAXLINE];  /* command line */
+};
+struct job_t jobs[MAXJOBS]; /* The job list */
+```
+
+除jobs子系统外其它都是Linux现成的，这与xv6实验中从0打造shell不同，这个就是一次系统编程实验。
+
+代码参考
+> shlab.pdf
+> https://zhuanlan.zhihu.com/p/28695244
+
+
+
