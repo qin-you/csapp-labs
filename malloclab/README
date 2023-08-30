@@ -1,52 +1,125 @@
-#####################################################################
-# CS:APP Malloc Lab
-# Handout files for students
-#
-# Copyright (c) 2002, R. Bryant and D. O'Hallaron, All rights reserved.
-# May not be used, modified, or copied without permission.
-#
-######################################################################
-
-***********
 Main Files:
-***********
 
-mm.{c,h}	
-	Your solution malloc package. mm.c is the file that you
-	will be handing in, and is the only file you should modify.
+mm.{c,h}		the only file you should modify.
 
-mdriver.c	
-	The malloc driver that tests your mm.c file
+mdriver.c		The malloc driver that tests your mm.c file
 
-short{1,2}-bal.rep
-	Two tiny tracefiles to help you get started. 
+short{1,2}-bal.rep	Two tiny tracefiles to help you get started. 
 
-Makefile	
-	Builds the driver
+traces/*		all tracefiles. `./mdriver -t ./traces` to test.
 
-**********************************
-Other support files for the driver
-**********************************
+memlib.{c,h}		Models the heap and sbrk function
 
-config.h	Configures the malloc lab driver
-fsecs.{c,h}	Wrapper function for the different timer packages
-clock.{c,h}	Routines for accessing the Pentium and Alpha cycle counters
-fcyc.{c,h}	Timer functions based on cycle counters
-ftimer.{c,h}	Timer functions based on interval timers and gettimeofday()
-memlib.{c,h}	Models the heap and sbrk function
 
-*******************************
-Building and running the driver
-*******************************
-To build the driver, type "make" to the shell.
+Building and running the driver:
+```sh
+make clean
+make
+./mdriver -V -f short1-bal.rep
+./mdriver -V -t ./traces
+```
 
-To run the driver on a tiny test trace:
 
-	unix> mdriver -V -f short1-bal.rep
+################# NOTE ######################
 
-The -V option prints out helpful tracing and summary information.
+------------------ 基础 --------------------
+malloc 是从堆上分配内存
+堆内存是通过空闲块的链表结构组织起来的，每个块就是一个链表节点，每个块大小不一
+隐式链表组织方式中，每个普通块由 头部-数据空间-尾部 组成，尾部和下一个块的头部相邻，头部/尾部占一个字（32 bits）
+头尾部和链表的链接工作有关，即用于链表组织。
 
-To get a list of the driver flags:
+举例，对malloc(11*WSIZE)
+分配的空间需要满足
+	双字（64bits）对齐， 11会变成12
+	包含头尾部， 12会变成14
+因此malloc内部会找 >=14 的内存块，这个过程叫【匹配】，相应的算法有，首次匹配，最优匹配，一个重时间一个重空间。
 
-	unix> mdriver -h
+如果匹配到大空闲块，比如24字的，为避免浪费可做一次【切割】，24-14=10，切出10字的空闲块。此处自然满足双字对齐，因为原空闲块和分配的块都满足，偶数-偶数=偶数。
+
+如果无匹配，则【扩展】堆空间，扩展大小为14字
+
+使用完毕后不用的堆内存需要free，free后会产生一个空闲块，检查有相邻空闲块可以【合并】
+
+题外话：
+malloc分配的是虚拟空间，并不会立即分配物理内存，需等到使用时产生缺页中断，其处理函数分配。
+
+
+
+
+------------------------- 实验 --------------------------------
+
+- 本实验是在完整的内核之上、在应用层，模拟出动态内存分配机制，模拟出的api以 `mm_`, `mem_`开头
+- malloc申请的size，和sbrk申请的size不是同一个，后者需要在前者基础上加上header footer，并考虑双字（64 bits）对齐。
+- 链表节点头部和尾部里的size信息是asize，即包含了header footer本身的。只有这样链表才方便连起来。 见csapp图 [9-36]().
+- extend-heap 会覆盖原epilogue，这样分配的空间尾部就会多出来一个，用作新epilogue
+- 注意几个指针的指向
+	- bp   		blockpointer 有效载荷的首地址 往低一个字（32 bits）就是header
+	- mem_brk	模拟堆 的最后一个字节+1 的位置。 往低一个字就是epilogue
+
+- 隐式链表的遍历：
+	```c
+	for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+		if (GET_SIZE(HDRP(bp)) >= asize && !GET_ALLOC(HDRP(bp))) {
+		;
+		}
+	}
+	```
+其中heap_listp是自定义全局变量，表示链表头，永远指向Prologue footer位置，往低一个字就是prologue header。
+
+注意遍历循环的开始位置和终止条件，这表明了prologue和epilogue的作用：
+参照csapp图 ![9-42](https://pic2.zhimg.com/80/v2-4dc7cdea0377a8f8005f67cae4e14a81_1440w.webp)
+
+序言块prologue是由
+	```c
+	// 代码截取自mm_init 此处只需关注size和alloc信息
+	// Prologue header
+	PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));
+	// prologue footer
+	PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));
+	```
+组成，注意到所占空间是一个双字，即只包含头部和尾部，没有中间的数据空间。这个特殊清空只允许在prologue出现，
+普通块的大小至少要两个双字，一个存头尾部，一个存数据。
+链表头指向prologue footer是因为，对它做NEXT_BLKP正好可以到下一个普通块的头部！
+因此序言块prologue起一个哨兵节点的作用。
+
+结尾块epilogue
+```c
+PUT(heap_listp + (3*WSIZE), PACK(0, 1));
+```
+可以看到pack(0,1)，看上去似乎是一个并不合法的写法，但就是需要这种特殊写法来标识链表尾，即它不满足GET_SIZE(HDRP(bp)) > 0，
+遍历循环到这儿就会停止。 
+因此epilogue结尾块扮演了链表尾的空节点标志链表末端，类似NULL节点。
+
+- malloc pipeline
+	```
+	def mm_malloc(size)
+	{
+		increase size to satisfy DSIZE alignment and put header footer
+
+		find fitted block
+
+		if fitted: place the fitted block. split if possible
+
+		else: extend heap  and  place
+	}
+	```
+
+- 所谓隐式链表，就是没有显式的next和pre field。
+- 代码参照csapp书籍第9章 虚拟内存
+
+
+------------- 结论 ----------------
+隐式空闲链表得分很低，原因是每次分配块都需要遍历整个链表，复杂度O(n)，n包括空闲块和已分配块数量。
+
+改善方法：
+一.  使用显式空闲链表，可以把复杂度降到O(m) m < n, 只表示空闲块数量。 缺点：需要更多内存用于链表本身。
+
+二.  分离的空闲链表。让我们可以分桶搜索：
+分配器维护着一个空闲链表数组，每个大小类一个空闲链表，按照大小的升序排列。当分配器需要一个大小为 n 的块时，它就搜索相应的空闲链表。
+所谓大小类就是其尺寸的大小类别，比如1~99一类，100~999一类， 这样就有两个链表，需要小空间就去小类中找，大的就去大链表找。
+>有点类似常见的算法题，k个有序链表的合并，这里不是合并是搜索。
+
+两种办法是正交的，可对应4种类别更细的做法。
+
+
 
