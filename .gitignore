@@ -1,0 +1,5 @@
+*.o
+*.out
+proxylab/.noproxy
+proxylab/.proxy
+
